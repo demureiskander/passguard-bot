@@ -4,7 +4,7 @@ from aiogram.types import Message
 
 from config import settings
 from database.db import upsert_user
-from texts.messages import START_NEW, START_RETURNING, HELP, HELP_LEGAL
+from texts.messages import START_NEW, START_RETURNING, HELP, HELP_LEGAL, REPO_URL
 
 router = Router()
 
@@ -20,12 +20,8 @@ async def cmd_start(message: Message):
         full_name=user.full_name or name,
     )
 
-    if is_new:
-        text = START_NEW.format(name=name)
-    else:
-        text = START_RETURNING.format(name=name)
-
-    await message.answer(text, parse_mode="HTML")
+    text = START_NEW.format(name=name, repo=REPO_URL) if is_new else START_RETURNING.format(name=name)
+    await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
 
 
 @router.message(Command("help"))
@@ -38,7 +34,7 @@ async def cmd_help(message: Message):
         )
 
     await message.answer(
-        HELP.format(legal=legal),
+        HELP.format(legal=legal, repo=REPO_URL),
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
