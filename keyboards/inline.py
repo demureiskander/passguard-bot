@@ -28,6 +28,12 @@ def kb_cipher_results(password: str, category: str, attempt: int) -> InlineKeybo
     return builder.as_markup()
 
 
+def kb_retry(password: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🔄 Попробовать ещё раз", callback_data=f"retry:{password[:50]}")
+    return builder.as_markup()
+
+
 def kb_coffee() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="⭐ 50 Stars",  callback_data="stars:50")

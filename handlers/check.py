@@ -1,11 +1,12 @@
 import logging
 import asyncio
 import time
+from collections import defaultdict
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 
 from database.db import increment_checks
-from keyboards.inline import kb_show_ciphers, kb_cipher_categories, kb_cipher_results
+from keyboards.inline import kb_show_ciphers, kb_cipher_categories, kb_cipher_results, kb_retry
 from services.analyzer import analyze, mask_password, dots
 from services.ciphers import format_by_category
 from services.hibp import check_pwned
@@ -23,6 +24,17 @@ router = Router()
 MIN_LEN = 4
 MAX_LEN = 128
 
+# ─── Умный конкурентный лимит ─────────────────────────────────────────────────
+# Максимум одновременно обрабатываемых паролей на пользователя
+MAX_CONCURRENT = 5
+_active: dict[int, int] = defaultdict(int)  # user_id → кол-во активных задач
+
+RATE_LIMIT_SMART = (
+    "⏳ Я уже обрабатываю 5 паролей одновременно — чуть не справился!\n\n"
+    "Нажми кнопку ниже и я разберусь с этим паролем сразу как освобожусь."
+)
+
+# ─── Колбэк-лимит (кнопки) ────────────────────────────────────────────────────
 _cb_last: dict[int, float] = {}
 CB_COOLDOWN = 3.0
 
@@ -35,17 +47,14 @@ def _cb_allowed(user_id: int) -> bool:
     return True
 
 
-@router.message(F.text & ~F.text.startswith("/"))
-async def handle_password(message: Message):
-    password = message.text.strip()
-    if len(password) < MIN_LEN:
-        await message.answer(TOO_SHORT)
-        return
-    if len(password) > MAX_LEN:
-        await message.answer(TOO_LONG)
-        return
+# ─── Основная логика обработки пароля ─────────────────────────────────────────
 
-    wait_msg = await message.answer(ANALYZING)
+async def _process_password(password: str, user_id: int, reply_target: Message) -> None:
+    """
+    Общая функция обработки пароля — используется и из handle_password,
+    и из cb_retry. reply_target — сообщение на которое отвечаем.
+    """
+    wait_msg = await reply_target.reply(ANALYZING)
     try:
         hibp_task  = asyncio.create_task(check_pwned(password))
         analysis   = analyze(password)
@@ -79,12 +88,78 @@ async def handle_password(message: Message):
             parse_mode="HTML",
             reply_markup=kb_show_ciphers(password) if show_btn else None,
         )
-        await increment_checks(message.from_user.id)
+        await increment_checks(user_id)
 
     except Exception as e:
-        logger.exception("Ошибка: %s", type(e).__name__)
-        await wait_msg.edit_text(ERROR_GENERIC)
+        logger.exception("Ошибка при проверке: %s", type(e).__name__)
+        try:
+            await wait_msg.edit_text(ERROR_GENERIC)
+        except Exception:
+            pass
 
+
+# ─── Хендлер входящего пароля ─────────────────────────────────────────────────
+
+@router.message(F.text & ~F.text.startswith("/"))
+async def handle_password(message: Message):
+    password = message.text.strip()
+
+    if len(password) < MIN_LEN:
+        await message.answer(TOO_SHORT)
+        return
+    if len(password) > MAX_LEN:
+        await message.answer(TOO_LONG)
+        return
+
+    user_id = message.from_user.id
+
+    # Проверяем конкурентный лимит
+    if _active[user_id] >= MAX_CONCURRENT:
+        await message.reply(
+            RATE_LIMIT_SMART,
+            reply_markup=kb_retry(password),
+        )
+        return
+
+    # Берём слот
+    _active[user_id] += 1
+    try:
+        await _process_password(password, user_id, message)
+    finally:
+        _active[user_id] -= 1
+        if _active[user_id] <= 0:
+            del _active[user_id]
+
+
+# ─── Retry: повторная обработка пароля из pending-сообщения ───────────────────
+
+@router.callback_query(F.data.startswith("retry:"))
+async def cb_retry(callback: CallbackQuery):
+    password = callback.data.removeprefix("retry:")
+    user_id  = callback.from_user.id
+
+    if _active[user_id] >= MAX_CONCURRENT:
+        await callback.answer("Всё ещё занят, подожди секунду ⏳", show_alert=False)
+        return
+
+    await callback.answer()
+
+    # Убираем кнопку с сообщения об ошибке
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    _active[user_id] += 1
+    try:
+        await _process_password(password, user_id, callback.message)
+    finally:
+        _active[user_id] -= 1
+        if _active[user_id] <= 0:
+            del _active[user_id]
+
+
+# ─── Выбор категории ──────────────────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("ciphers:"))
 async def cb_show_categories(callback: CallbackQuery):
@@ -100,13 +175,14 @@ async def cb_show_categories(callback: CallbackQuery):
     )
 
 
+# ─── Варианты по категории ────────────────────────────────────────────────────
+
 @router.callback_query(F.data.startswith("cat:"))
 async def cb_show_ciphers_by_category(callback: CallbackQuery):
     if not _cb_allowed(callback.from_user.id):
         await callback.answer(RATE_LIMIT_CB, show_alert=False)
         return
 
-    # формат: cat:CATEGORY:ATTEMPT:PASSWORD
     parts    = callback.data.split(":", 3)
     category = parts[1]
     attempt  = int(parts[2])
