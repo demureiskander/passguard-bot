@@ -3,7 +3,7 @@ import logging
 from datetime import date
 
 logger = logging.getLogger(__name__)
-DB_PATH = "bot.db"
+DB_PATH = "/data/bot.db"
 
 
 async def init_db():
