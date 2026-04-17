@@ -23,18 +23,14 @@ router = Router()
 
 MIN_LEN = 4
 MAX_LEN = 128
-
-# ─── Умный конкурентный лимит ─────────────────────────────────────────────────
-# Максимум одновременно обрабатываемых паролей на пользователя
 MAX_CONCURRENT = 5
-_active: dict[int, int] = defaultdict(int)  # user_id → кол-во активных задач
 
 RATE_LIMIT_SMART = (
-    "⏳ Я уже обрабатываю 5 паролей одновременно — чуть не справился!\n\n"
-    "Нажми кнопку ниже и я разберусь с этим паролем сразу как освобожусь."
+    "⏳ Уже обрабатываю 5 паролей одновременно — чуть не справился!\n\n"
+    "Нажми кнопку ниже и я разберусь с этим паролем как только освобожусь."
 )
 
-# ─── Колбэк-лимит (кнопки) ────────────────────────────────────────────────────
+_active: dict[int, int] = defaultdict(int)
 _cb_last: dict[int, float] = {}
 CB_COOLDOWN = 3.0
 
@@ -47,14 +43,8 @@ def _cb_allowed(user_id: int) -> bool:
     return True
 
 
-# ─── Основная логика обработки пароля ─────────────────────────────────────────
-
-async def _process_password(password: str, user_id: int, reply_target: Message) -> None:
-    """
-    Общая функция обработки пароля — используется и из handle_password,
-    и из cb_retry. reply_target — сообщение на которое отвечаем.
-    """
-    wait_msg = await reply_target.reply(ANALYZING)
+async def _process_password(password: str, user_id: int, source_message: Message) -> None:
+    wait_msg = await source_message.reply(ANALYZING)
     try:
         hibp_task  = asyncio.create_task(check_pwned(password))
         analysis   = analyze(password)
@@ -96,42 +86,32 @@ async def _process_password(password: str, user_id: int, reply_target: Message) 
             await wait_msg.edit_text(ERROR_GENERIC)
         except Exception:
             pass
-
-
-# ─── Хендлер входящего пароля ─────────────────────────────────────────────────
-
-@router.message(F.text & ~F.text.startswith("/"))
-async def handle_password(message: Message):
-    password = message.text.strip()
-
-    if len(password) < MIN_LEN:
-        await message.answer(TOO_SHORT)
-        return
-    if len(password) > MAX_LEN:
-        await message.answer(TOO_LONG)
-        return
-
-    user_id = message.from_user.id
-
-    # Проверяем конкурентный лимит
-    if _active[user_id] >= MAX_CONCURRENT:
-        await message.reply(
-            RATE_LIMIT_SMART,
-            reply_markup=kb_retry(password),
-        )
-        return
-
-    # Берём слот
-    _active[user_id] += 1
-    try:
-        await _process_password(password, user_id, message)
     finally:
         _active[user_id] -= 1
         if _active[user_id] <= 0:
             del _active[user_id]
 
 
-# ─── Retry: повторная обработка пароля из pending-сообщения ───────────────────
+@router.message(F.text & ~F.text.startswith("/"))
+async def handle_password(message: Message):
+    password = message.text.strip()
+
+    if len(password) < MIN_LEN:
+        await message.reply(TOO_SHORT)
+        return
+    if len(password) > MAX_LEN:
+        await message.reply(TOO_LONG)
+        return
+
+    user_id = message.from_user.id
+
+    if _active[user_id] >= MAX_CONCURRENT:
+        await message.reply(RATE_LIMIT_SMART, reply_markup=kb_retry(password))
+        return
+
+    _active[user_id] += 1
+    asyncio.create_task(_process_password(password, user_id, message))
+
 
 @router.callback_query(F.data.startswith("retry:"))
 async def cb_retry(callback: CallbackQuery):
@@ -143,23 +123,14 @@ async def cb_retry(callback: CallbackQuery):
         return
 
     await callback.answer()
-
-    # Убираем кнопку с сообщения об ошибке
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
 
     _active[user_id] += 1
-    try:
-        await _process_password(password, user_id, callback.message)
-    finally:
-        _active[user_id] -= 1
-        if _active[user_id] <= 0:
-            del _active[user_id]
+    asyncio.create_task(_process_password(password, user_id, callback.message))
 
-
-# ─── Выбор категории ──────────────────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("ciphers:"))
 async def cb_show_categories(callback: CallbackQuery):
@@ -174,8 +145,6 @@ async def cb_show_categories(callback: CallbackQuery):
         reply_markup=kb_cipher_categories(password),
     )
 
-
-# ─── Варианты по категории ────────────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("cat:"))
 async def cb_show_ciphers_by_category(callback: CallbackQuery):

@@ -9,7 +9,6 @@ from aiogram.types import BotCommand
 
 from config import settings
 from database.db import init_db
-from middlewares.rate_limit import RateLimitMiddleware
 
 from handlers import start, check, coffee, admin
 
@@ -37,7 +36,6 @@ async def main():
     dp = Dispatcher(storage=MemoryStorage())
 
     # Middleware
-    dp.message.middleware(RateLimitMiddleware())
 
     # Роутеры — порядок важен: catch-all (check) идёт последним
     dp.include_router(start.router)
