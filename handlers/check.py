@@ -43,9 +43,23 @@ def _cb_allowed(user_id: int) -> bool:
     return True
 
 
-async def _process_password(password: str, user_id: int, source_message: Message) -> None:
-    wait_msg = await source_message.reply(ANALYZING)
+async def _process_password(
+    password: str,
+    user_id: int,
+    source_message: Message,
+    edit_mode: bool = False,
+) -> None:
+    """
+    edit_mode=False — отвечаем reply (обычный запрос)
+    edit_mode=True  — редактируем source_message на месте (retry)
+    """
     try:
+        if edit_mode:
+            wait_msg = source_message
+            await wait_msg.edit_text(ANALYZING, reply_markup=None)
+        else:
+            wait_msg = await source_message.reply(ANALYZING)
+
         hibp_task  = asyncio.create_task(check_pwned(password))
         analysis   = analyze(password)
         hibp_count = await hibp_task
@@ -110,7 +124,7 @@ async def handle_password(message: Message):
         return
 
     _active[user_id] += 1
-    asyncio.create_task(_process_password(password, user_id, message))
+    asyncio.create_task(_process_password(password, user_id, message, edit_mode=False))
 
 
 @router.callback_query(F.data.startswith("retry:"))
@@ -123,13 +137,12 @@ async def cb_retry(callback: CallbackQuery):
         return
 
     await callback.answer()
-    try:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
 
     _active[user_id] += 1
-    asyncio.create_task(_process_password(password, user_id, callback.message))
+    # Редактируем само сообщение с pending — результат появится на его месте
+    asyncio.create_task(
+        _process_password(password, user_id, callback.message, edit_mode=True)
+    )
 
 
 @router.callback_query(F.data.startswith("ciphers:"))
